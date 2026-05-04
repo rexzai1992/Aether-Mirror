@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Real-time 3D mirror using Three.js + MediaPipe" />
+    <title>Aether 3D Mirror</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Rajdhani:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./style.css?v=20260504b" />
+  </head>
+  <body>
+    <div id="app">
+      <video id="webcam" autoplay playsinline muted></video>
+      <canvas id="three-canvas"></canvas>
+      <canvas id="debug-canvas"></canvas>
+      <div id="scan-overlay" aria-hidden="true"></div>
+
+      <div id="mode-chip">Mode: Mirror AR</div>
+      <div id="gesture-chip">Gesture: None</div>
+
+      <aside id="status-panel">
+        <h2>System Status</h2>
+        <ul>
+          <li><span>Camera</span><strong id="status-camera">inactive</strong></li>
+          <li><span>Pose</span><strong id="status-pose">not detected</strong></li>
+          <li><span>Hands</span><strong id="status-hands">not detected</strong></li>
+          <li><span>Face</span><strong id="status-face">not detected</strong></li>
+          <li><span>Mouth</span><strong id="status-mouth">closed</strong></li>
+          <li><span>Body Coverage</span><strong id="status-body">unknown</strong></li>
+          <li><span>Avatar</span><strong id="status-avatar">not loaded</strong></li>
+          <li><span>Skeleton Found</span><strong id="status-skeleton">no</strong></li>
+          <li><span>Finger Rig</span><strong id="status-finger-rig">checking</strong></li>
+          <li><span>Mouth Rig</span><strong id="status-mouth-rig">checking</strong></li>
+          <li><span>Fallback Skeleton</span><strong id="status-fallback">active</strong></li>
+          <li><span>Lower Body Estimate</span><strong id="status-estimate">inactive</strong></li>
+          <li><span>Calibration</span><strong id="status-calibration">not set</strong></li>
+          <li><span>Avatar Orientation</span><strong id="status-orientation">normal</strong></li>
+          <li><span>Current Gesture</span><strong id="status-gesture">none</strong></li>
+          <li><span>Video Resolution</span><strong id="status-video-res">0x0</strong></li>
+          <li><span>Pose Landmarks</span><strong id="status-pose-count">0</strong></li>
+          <li><span>Hand Landmarks</span><strong id="status-hand-count">0</strong></li>
+          <li><span>FPS</span><strong id="status-fps">0</strong></li>
+        </ul>
+      </aside>
+
+      <div id="control-dock">
+        <button id="calibrate-btn" type="button">Calibrate Pose</button>
+        <button id="flip-btn" type="button">Flip Avatar</button>
+        <button id="avatar-btn" type="button">Change Character: Vanguard</button>
+        <button id="light-btn" type="button">Lighting: Unlit</button>
+        <button id="debug-btn" type="button">Debug: Off</button>
+        <button id="camera-debug-btn" type="button">Camera: Auto</button>
+        <button id="landmark-debug-btn" type="button">Landmarks: On</button>
+        <button id="bones-debug-btn" type="button">Bones: Off</button>
+      </div>
+
+      <aside id="debug-panel">
+        <h2>Debug Log</h2>
+        <pre id="debug-log">Booting diagnostics...</pre>
+      </aside>
+
+      <aside id="calibration-console">
+        <h2>Calibration Console</h2>
+        <div class="cal-row">
+          <label for="cal-anchor">Anchor</label>
+          <select id="cal-anchor">
+            <option value="hips">Hips</option>
+            <option value="chest">Chest</option>
+            <option value="neck">Neck</option>
+            <option value="face">Face</option>
+            <option value="head">Head</option>
+            <option value="leftHand">Left Hand</option>
+            <option value="rightHand">Right Hand</option>
+          </select>
+        </div>
+        <div class="cal-row">
+          <label for="cal-offset-x">Offset X</label>
+          <input id="cal-offset-x" type="range" min="-2" max="2" step="0.01" value="0" />
+          <span id="cal-offset-x-val">0.00</span>
+        </div>
+        <div class="cal-row">
+          <label for="cal-offset-y">Offset Y</label>
+          <input id="cal-offset-y" type="range" min="-2" max="2" step="0.01" value="0" />
+          <span id="cal-offset-y-val">0.00</span>
+        </div>
+        <div class="cal-row">
+          <label for="cal-offset-z">Offset Z</label>
+          <input id="cal-offset-z" type="range" min="-2" max="2" step="0.01" value="0" />
+          <span id="cal-offset-z-val">0.00</span>
+        </div>
+        <div class="cal-row">
+          <label for="cal-yaw">Yaw</label>
+          <input id="cal-yaw" type="range" min="-180" max="180" step="1" value="0" />
+          <span id="cal-yaw-val">0deg</span>
+        </div>
+        <div class="cal-row">
+          <label for="cal-scale">Scale</label>
+          <input id="cal-scale" type="range" min="0.5" max="2.5" step="0.01" value="1" />
+          <span id="cal-scale-val">1.00x</span>
+        </div>
+        <div class="cal-row">
+          <label for="cal-hand-gain">Hand Gain</label>
+          <input id="cal-hand-gain" type="range" min="0" max="2" step="0.01" value="1" />
+          <span id="cal-hand-gain-val">1.00</span>
+        </div>
+        <div class="cal-row">
+          <label for="cal-head-gain">Head Gain</label>
+          <input id="cal-head-gain" type="range" min="0" max="2" step="0.01" value="1" />
+          <span id="cal-head-gain-val">1.00</span>
+        </div>
+        <div class="cal-actions">
+          <button id="cal-reset-btn" type="button">Reset Cal</button>
+          <button id="cal-save-btn" type="button">Save Cal</button>
+        </div>
+      </aside>
+
+      <div id="start-overlay">
+        <div class="panel">
+          <span class="eyebrow">Aether Suit Interface</span>
+          <h1>Aether Mirror</h1>
+          <p>
+            Real-time avatar armor sync using Three.js and MediaPipe.
+            Stand in frame and let the mirror wrap the rig to your movement.
+          </p>
+          <button id="start-btn" type="button">Start Camera</button>
+          <button id="start-avatar-btn" type="button">Change Character: Vanguard</button>
+          <p id="start-note"></p>
+        </div>
+      </div>
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.163.0/build/three.module.js"
+        }
+      }
+    </script>
+    <script>
+      // Cloudflare R2 (mecha-mirror-assets) public dev URL.
+      window.AETHER_R2_BASE_URL = "https://pub-cd27d334a1984adcbea5ecec537b401a.r2.dev";
+      // Avatar manifest backed by R2 objects.
+      window.AETHER_R2_AVATARS = [
+        { name: "Vanguard", file: "avatar.glb" },
+        { name: "Iron Man Rig", file: "avatar_iron.glb" },
+        { name: "Avaturn", file: "avaturn.glb" },
+        { name: "Mecha", file: "avatar_mecha.glb" },
+        { name: "Alt", file: "avatar_alt.glb" },
+        { name: "Azure Titan", file: "avatar_azure_titan.glb" }
+      ];
+    </script>
+    <script type="module" src="./main.js?v=20260504i"></script>
+  </body>
+</html>
