@@ -31,6 +31,17 @@ function resolveR2AssetPath(fileName) {
   return `${R2_ASSET_BASE_URL}/${cleanFile}`;
 }
 
+function isDirectAssetPath(path) {
+  const value = String(path || "").trim();
+  if (!value) return false;
+  return (
+    /^https?:\/\//i.test(value) ||
+    value.startsWith("./") ||
+    value.startsWith("../") ||
+    value.startsWith("/")
+  );
+}
+
 function toAvatarConfigEntry(entry, index) {
   if (!entry) return null;
 
@@ -46,22 +57,27 @@ function toAvatarConfigEntry(entry, index) {
   const rawFile = String(entry.file || "").trim();
   const rawPath = String(entry.path || "").trim();
 
-  const isDirectPath =
-    /^https?:\/\//i.test(rawPath) ||
-    rawPath.startsWith("./") ||
-    rawPath.startsWith("../") ||
-    rawPath.startsWith("/");
-
-  const resolvedPath = isDirectPath
+  const resolvedPath = isDirectAssetPath(rawPath)
     ? rawPath
     : resolveR2AssetPath(rawPath || rawFile);
   if (!resolvedPath) return null;
+
+  const rawPreview = String(
+    entry.preview || entry.thumbnail || entry.poster || entry.image || ""
+  ).trim();
+  const fallbackPreview = rawFile
+    ? rawFile.replace(/\.glb$/i, ".jpg")
+    : "";
+  const resolvedPreview = rawPreview
+    ? (isDirectAssetPath(rawPreview) ? rawPreview : resolveR2AssetPath(rawPreview))
+    : (fallbackPreview ? resolveR2AssetPath(fallbackPreview) : "");
 
   const fallbackName = `Avatar ${index + 1}`;
   const name = String(entry.name || fallbackName).trim() || fallbackName;
   return {
     name,
     path: resolvedPath,
+    preview: resolvedPreview,
   };
 }
 
@@ -79,11 +95,14 @@ const CONFIG = {
   defaultLightingMode: "unlit",
   avatarStorageKey: "aether-selected-avatar-v2",
   lightingStorageKey: "aether-avatar-lighting-v2",
-  smoothing: 0.28,
-  rotationSmoothing: 0.24,
-  landmarkConfidence: 0.45,
+  smoothing: 0.42,
+  rotationSmoothing: 0.34,
+  landmarkConfidence: 0.3,
   gestureCooldownMs: 1400,
   swipeCooldownMs: 900,
+  poseDetectIntervalMs: 16,
+  handDetectIntervalMs: 24,
+  faceDetectIntervalMs: 24,
   mirrorModeDefault: true,
   mirrorSwapSides: true,
   modelAssetBase: "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
@@ -110,8 +129,11 @@ const CONFIG = {
   orientationStorageKey: "aether-avatar-orientation-preset-v2",
   manualScaleMin: 0.5,
   manualScaleMax: 2.5,
-  avatarPlacementLerp: 0.2,
+  avatarPlacementLerp: 0.34,
   avatarScaleLerp: 0.22,
+  noPoseCenterDelayMs: 900,
+  noPoseCenterLerp: 0.22,
+  noPoseCenterYOffset: -0.62,
   avatarWrapScaleBoost: 1.0,
   avatarWrapScaleMin: 0.25,
   avatarWrapScaleMax: 4.0,
@@ -131,8 +153,9 @@ const CONFIG = {
   poseLogIntervalMs: 1500,
   handLogIntervalMs: 1500,
   faceLogIntervalMs: 1500,
-  mouthSmoothing: 0.32,
+  mouthSmoothing: 0.46,
   mouthLerp: 0.28,
+  jointHoldMs: 140,
   mouthOpenGain: 1.35,
   mouthLandmarkOpenMin: 0.035,
   mouthLandmarkOpenMax: 0.28,
@@ -145,6 +168,7 @@ const CONFIG = {
   debugLandmarksDefault: true,
   debugBonesDefault: false,
   debugLogMaxLines: 16,
+  rendererPixelRatioCap: 1.5,
 };
 
 const POSE = {
@@ -360,6 +384,7 @@ const REQUIRED_BONES = [
   "rightUpperLeg",
   "rightLowerLeg",
 ];
+const MAX_MISSING_REQUIRED_BONES = 4;
 
 const BONE_ALIASES = {
   hips: [
@@ -533,6 +558,16 @@ function averagePoints(points) {
   return out.multiplyScalar(1 / points.length);
 }
 
+function avatarGlyph(name) {
+  const cleaned = String(name || "").trim();
+  if (!cleaned) return "?";
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) {
+    return `${words[0][0]}${words[1][0]}`.toUpperCase();
+  }
+  return cleaned.slice(0, 2).toUpperCase();
+}
+
 class StatusUI {
   constructor() {
     this.startOverlay = document.getElementById("start-overlay");
@@ -541,6 +576,7 @@ class StatusUI {
     this.calibrateBtn = document.getElementById("calibrate-btn");
     this.flipBtn = document.getElementById("flip-btn");
     this.avatarBtn = document.getElementById("avatar-btn");
+    this.menuBtn = document.getElementById("menu-btn");
     this.lightBtn = document.getElementById("light-btn");
     this.debugBtn = document.getElementById("debug-btn");
     this.cameraDebugBtn = document.getElementById("camera-debug-btn");
@@ -548,6 +584,19 @@ class StatusUI {
     this.bonesDebugBtn = document.getElementById("bones-debug-btn");
     this.debugLogEl = document.getElementById("debug-log");
     this.startNote = document.getElementById("start-note");
+    this.avatarLoading = document.getElementById("avatar-loading");
+    this.avatarLoadingText = document.getElementById("avatar-loading-text");
+    this.avatarLoadingBar = document.getElementById("avatar-loading-bar");
+    this.avatarLoadingPercent = document.getElementById("avatar-loading-percent");
+    this.avatarLoadingMeta = document.getElementById("avatar-loading-meta");
+    this.avatarLoadingActions = document.getElementById("avatar-loading-actions");
+    this.avatarLoadingDownloadBtn = document.getElementById("avatar-loading-download");
+    this.avatarLoadingReportBtn = document.getElementById("avatar-loading-report");
+    this.avatarLoadingSwitchBtn = document.getElementById("avatar-loading-switch");
+    this.avatarPicker = document.getElementById("avatar-picker");
+    this.avatarPickerTitle = document.getElementById("avatar-picker-title");
+    this.avatarPickerGrid = document.getElementById("avatar-profile-grid");
+    this.avatarPickerCloseBtn = document.getElementById("avatar-picker-close");
     this.modeChip = document.getElementById("mode-chip");
     this.gestureChip = document.getElementById("gesture-chip");
     this.calibrationConsole = {
@@ -600,12 +649,16 @@ class StatusUI {
   }
 
   setGesture(label) {
-    this.gestureChip.textContent = `Gesture: ${label}`;
+    if (this.gestureChip) {
+      this.gestureChip.textContent = `Gesture: ${label}`;
+    }
     this.setStatus("gesture", label);
   }
 
   setMode(isMirror) {
-    this.modeChip.textContent = `Mode: ${isMirror ? "Mirror AR" : "Full Avatar"}`;
+    if (this.modeChip) {
+      this.modeChip.textContent = `Mode: ${isMirror ? "Mirror AR" : "Full Avatar"}`;
+    }
     document.body.classList.toggle("full-avatar", !isMirror);
   }
 
@@ -616,6 +669,75 @@ class StatusUI {
   showStartNote(message, error = false) {
     this.startNote.textContent = message;
     this.startNote.style.color = error ? "#ff8d8d" : "#ffd58a";
+  }
+
+  setAvatarLoadingMeta(message = "") {
+    if (!this.avatarLoadingMeta) return;
+    this.avatarLoadingMeta.textContent = message || "";
+  }
+
+  setAvatarLoading(message, progress = null) {
+    if (this.avatarLoadingText && message) {
+      this.avatarLoadingText.textContent = message;
+    }
+
+    const hasProgress = Number.isFinite(progress);
+    const normalized = hasProgress ? clamp(progress, 0, 1) : 0;
+    const percent = Math.round(normalized * 100);
+
+    if (this.avatarLoadingBar) {
+      if (hasProgress) {
+        this.avatarLoadingBar.style.width = `${percent}%`;
+      } else {
+        this.avatarLoadingBar.style.removeProperty("width");
+      }
+    }
+
+    if (this.avatarLoadingPercent) {
+      this.avatarLoadingPercent.textContent = hasProgress ? `${percent}%` : "Loading";
+    }
+  }
+
+  showAvatarLoading(message, progress = null) {
+    this.avatarLoading?.classList.add("glb-loading");
+    this.avatarLoading?.classList.remove("waiting-bones");
+    this.setAvatarLoadingMeta("");
+    this.setAvatarLoading(message, progress);
+    this.avatarLoading?.classList.add("visible");
+  }
+
+  showBoneDetectionWaiting(message, details = "") {
+    this.avatarLoading?.classList.add("glb-loading");
+    this.avatarLoading?.classList.add("waiting-bones");
+    this.setAvatarLoading(message || "Waiting for bone detection...", null);
+    if (this.avatarLoadingPercent) {
+      this.avatarLoadingPercent.textContent = "Waiting";
+    }
+    this.setAvatarLoadingMeta(details);
+    this.avatarLoading?.classList.add("visible");
+  }
+
+  hideAvatarLoading() {
+    this.avatarLoading?.classList.remove("glb-loading");
+    this.avatarLoading?.classList.remove("waiting-bones");
+    this.avatarLoading?.classList.remove("visible");
+    this.setAvatarLoadingMeta("");
+  }
+
+  setAvatarPickerVisible(flag) {
+    if (!this.avatarPicker) return;
+    this.avatarPicker.classList.toggle("visible", Boolean(flag));
+    this.avatarPicker.setAttribute("aria-hidden", flag ? "false" : "true");
+  }
+
+  setAvatarPickerTitle(text) {
+    if (!this.avatarPickerTitle) return;
+    this.avatarPickerTitle.textContent = text || "Choose Your Character";
+  }
+
+  setAvatarPickerCloseVisible(flag) {
+    if (!this.avatarPickerCloseBtn) return;
+    this.avatarPickerCloseBtn.style.display = flag ? "" : "none";
   }
 }
 
@@ -677,6 +799,10 @@ class LandmarkSmoother {
       if (!out[name]) out[name] = value.clone();
     }
     return out;
+  }
+
+  reset() {
+    this.store.clear();
   }
 }
 
@@ -803,7 +929,14 @@ class AvatarMotionSystem {
     this.debugBonesVisible = CONFIG.debugBonesDefault;
     this.avatarPlacementInitialized = false;
     this.rigMetrics = null;
+    this.lastRigDiagnostic = null;
     this.lightingMode = "lit";
+    this.neutralDisplayPosition = new THREE.Vector3(0, 0, 0);
+    this.tmpIdleBounds = new THREE.Box3();
+    this.tmpIdleCenterWorld = new THREE.Vector3();
+    this.tmpIdleCenterLocal = new THREE.Vector3();
+    this.tmpIdleDeltaLocal = new THREE.Vector3();
+    this.tmpNoPoseIdleTarget = new THREE.Vector3();
 
     this.rootAxes = new THREE.AxesHelper(0.35);
     this.rootAxes.visible = false;
@@ -828,6 +961,8 @@ class AvatarMotionSystem {
     }
 
     this.applyOrientationPreset(false);
+    this.avatarBufferCache = new Map();
+    this.avatarPrefetchJobs = new Map();
   }
 
   disposeMaterial(material) {
@@ -955,12 +1090,95 @@ class AvatarMotionSystem {
     this.ui.setStatus("mouthRig", "checking");
   }
 
-  async loadAvatar(path) {
-    this.clearLoadedAvatar();
+  resolveAssetBasePath(path) {
+    if (!path) return "";
+    const cleanPath = String(path).split("#")[0].split("?")[0];
+    const slash = cleanPath.lastIndexOf("/");
+    return slash >= 0 ? cleanPath.slice(0, slash + 1) : "";
+  }
 
-    if (!path) {
+  async prefetchAvatar(path) {
+    const normalizedPath = String(path || "").trim();
+    if (!normalizedPath) return null;
+
+    const cached = this.avatarBufferCache.get(normalizedPath);
+    if (cached) return cached;
+
+    if (this.avatarPrefetchJobs.has(normalizedPath)) {
+      return this.avatarPrefetchJobs.get(normalizedPath);
+    }
+
+    const job = fetch(normalizedPath, {
+      mode: "cors",
+      credentials: "omit",
+    })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Avatar prefetch failed (${response.status})`);
+        }
+        return response.arrayBuffer();
+      })
+      .then((buffer) => {
+        this.avatarBufferCache.set(normalizedPath, buffer);
+        return buffer;
+      })
+      .finally(() => {
+        this.avatarPrefetchJobs.delete(normalizedPath);
+      });
+
+    this.avatarPrefetchJobs.set(normalizedPath, job);
+    return job;
+  }
+
+  parseAvatarBuffer(loader, path, buffer) {
+    return new Promise((resolve, reject) => {
+      loader.parse(
+        buffer,
+        this.resolveAssetBasePath(path),
+        (gltf) => resolve(gltf),
+        (error) => reject(error)
+      );
+    });
+  }
+
+  buildInitialRigDiagnostic(path = "") {
+    return {
+      path: String(path || "").trim(),
+      reason: "loading",
+      skeletonStatus: "checking",
+      missingRequiredBones: [],
+      detectedBoneNames: [],
+      detectedBoneCount: 0,
+      resolvedBoneMap: null,
+      requiredBoneCount: REQUIRED_BONES.length,
+      maxMissingRequiredBones: MAX_MISSING_REQUIRED_BONES,
+      fallbackActive: true,
+      canTrack: false,
+      error: "",
+    };
+  }
+
+  setRigDiagnostic(update = {}) {
+    const current = this.lastRigDiagnostic || this.buildInitialRigDiagnostic(update.path);
+    this.lastRigDiagnostic = { ...current, ...update };
+  }
+
+  async loadAvatar(path, options = {}) {
+    this.clearLoadedAvatar();
+    const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+    const normalizedPath = String(path || "").trim();
+    this.lastRigDiagnostic = this.buildInitialRigDiagnostic(normalizedPath);
+
+    if (!normalizedPath) {
       console.warn("No avatar found. Using fallback skeleton rig.");
       this.ui.setStatus("avatar", "not loaded");
+      this.setRigDiagnostic({
+        reason: "no-path",
+        skeletonStatus: "no",
+        fallbackActive: true,
+        canTrack: false,
+        error: "Avatar path is empty.",
+      });
       this.activateFallback(true);
       return;
     }
@@ -968,7 +1186,40 @@ class AvatarMotionSystem {
     const loader = new GLTFLoader();
 
     try {
-      const gltf = await loader.loadAsync(path);
+      let gltf = null;
+      const prefetched =
+        this.avatarBufferCache.get(normalizedPath) ||
+        (this.avatarPrefetchJobs.has(normalizedPath)
+          ? await this.avatarPrefetchJobs.get(normalizedPath)
+          : null);
+
+      if (prefetched) {
+        if (onProgress) {
+          const size = Number(prefetched.byteLength) || 0;
+          onProgress({
+            loaded: size,
+            total: size,
+            progress: 1,
+          });
+        }
+        gltf = await this.parseAvatarBuffer(loader, normalizedPath, prefetched.slice(0));
+      } else {
+        gltf = await new Promise((resolve, reject) => {
+          loader.load(
+            normalizedPath,
+            (loadedGltf) => resolve(loadedGltf),
+            (event) => {
+              if (!onProgress) return;
+              const total = Number(event?.total) || 0;
+              const loaded = Number(event?.loaded) || 0;
+              const progress = total > 0 ? clamp(loaded / total, 0, 1) : null;
+              onProgress({ loaded, total, progress });
+            },
+            (error) => reject(error)
+          );
+        });
+      }
+
       this.avatarScene = gltf.scene;
       this.displayNode.add(this.avatarScene);
       this.avatarLoaded = true;
@@ -985,27 +1236,50 @@ class AvatarMotionSystem {
         console.warn("Avatar is not rigged. Using fallback skeleton rig.");
         this.ui.setStatus("avatar", "loaded (unrigged)");
         this.ui.setStatus("skeleton", "no");
+        this.setRigDiagnostic({
+          reason: "unrigged-mesh",
+          skeletonStatus: "no",
+          fallbackActive: true,
+          canTrack: false,
+          error: "No SkinnedMesh with skeleton found in GLB.",
+        });
         this.activateFallback(true);
         return;
       }
 
       const bones = this.avatarSkinnedMesh.skeleton.bones;
-      console.log("Detected avatar bones:", bones.map((b) => b.name));
+      const boneNames = bones.map((b) => b.name || "(unnamed bone)");
+      console.log("Detected avatar bones:", boneNames);
 
       this.boneMap = this.mapBones(bones);
       const missing = REQUIRED_BONES.filter((k) => !this.boneMap[k]);
-      console.log("Missing required bones:", missing);
-      console.log(
-        "Resolved bone map:",
-        Object.fromEntries(
-          Object.entries(this.boneMap).map(([k, v]) => [k, v?.name || null])
-        )
+      const resolvedBoneMap = Object.fromEntries(
+        Object.entries(this.boneMap).map(([k, v]) => [k, v?.name || null])
       );
+      console.log("Missing required bones:", missing);
+      console.log("Resolved bone map:", resolvedBoneMap);
+      this.setRigDiagnostic({
+        reason: "mapped-bones",
+        skeletonStatus: "partial",
+        detectedBoneNames: boneNames,
+        detectedBoneCount: boneNames.length,
+        missingRequiredBones: [...missing],
+        resolvedBoneMap,
+        fallbackActive: true,
+        canTrack: false,
+      });
 
-      if (missing.length > 4) {
+      if (missing.length > MAX_MISSING_REQUIRED_BONES) {
         console.warn("Avatar is not rigged. Using fallback skeleton rig.");
         this.ui.setStatus("avatar", "loaded (invalid rig)");
         this.ui.setStatus("skeleton", "partial");
+        this.setRigDiagnostic({
+          reason: "missing-required-bones",
+          skeletonStatus: "partial",
+          fallbackActive: true,
+          canTrack: false,
+          error: `Missing ${missing.length} required bones.`,
+        });
         this.activateFallback(true);
         return;
       }
@@ -1013,6 +1287,12 @@ class AvatarMotionSystem {
       this.skeletonFound = true;
       this.ui.setStatus("avatar", "loaded");
       this.ui.setStatus("skeleton", "yes");
+      this.setRigDiagnostic({
+        reason: "ok",
+        skeletonStatus: "yes",
+        fallbackActive: false,
+        canTrack: true,
+      });
       this.normalizeAvatarScaleAndOrientation();
       this.activateFallback(false);
       this.captureRigMetrics();
@@ -1026,6 +1306,13 @@ class AvatarMotionSystem {
       console.warn("No avatar found. Using fallback skeleton rig.", error);
       this.ui.setStatus("avatar", "not loaded");
       this.ui.setStatus("skeleton", "no");
+      this.setRigDiagnostic({
+        reason: "load-error",
+        skeletonStatus: "no",
+        fallbackActive: true,
+        canTrack: false,
+        error: error?.message || String(error),
+      });
       this.activateFallback(true);
     }
   }
@@ -1570,7 +1857,53 @@ class AvatarMotionSystem {
     this.root.position.set(0, 0, 0);
     this.root.rotation.set(0, 0, 0);
     this.gestureScaleMultiplier = 1;
+    this.displayNode.position.copy(this.neutralDisplayPosition);
+    this.avatarPlacementInitialized = false;
     this.refreshScale();
+  }
+
+  settleToCenterIdle(dt = 1 / 60) {
+    if (this.frozen) return;
+
+    const idleTarget = this.tmpNoPoseIdleTarget.copy(this.neutralDisplayPosition);
+    idleTarget.y += CONFIG.noPoseCenterYOffset;
+
+    const alpha = clamp(dt * 60 * CONFIG.noPoseCenterLerp, 0.08, 0.34);
+    this.displayNode.position.lerp(idleTarget, alpha);
+
+    // In no-visual idle mode, center the avatar by its visual bounds instead of rig origin.
+    const idleCenterSource = this.useFallback ? this.fallbackRig.group : this.avatarScene;
+    if (idleCenterSource) {
+      const parent = this.displayNode.parent || this.scene;
+      this.tmpIdleBounds.setFromObject(idleCenterSource);
+      if (!this.tmpIdleBounds.isEmpty()) {
+        this.tmpIdleBounds.getCenter(this.tmpIdleCenterWorld);
+        this.tmpIdleCenterLocal.copy(this.tmpIdleCenterWorld);
+        parent.worldToLocal(this.tmpIdleCenterLocal);
+        this.tmpIdleDeltaLocal
+          .copy(idleTarget)
+          .sub(this.tmpIdleCenterLocal)
+          .multiplyScalar(alpha);
+        this.displayNode.position.add(this.tmpIdleDeltaLocal);
+      }
+    }
+
+    this.trackingScale = THREE.MathUtils.lerp(this.trackingScale, 1, alpha);
+    this.refreshScale();
+
+    this.applyMouth(0, dt);
+
+    if (!this.useFallback) {
+      const relax = clamp(alpha * 0.9, 0.05, 0.32);
+      for (const solver of this.boneSolvers) {
+        solver.bone.quaternion.slerp(solver.initialQuat, relax);
+      }
+      if (this.jawBone && this.jawInitialQuat) {
+        this.jawBone.quaternion.slerp(this.jawInitialQuat, relax);
+      }
+    }
+
+    this.avatarPlacementInitialized = false;
   }
 
   toggleStyle() {
@@ -1654,6 +1987,12 @@ class PoseTracker {
 
     const prev = this.lastGood.get(name);
     if (!prev) return null;
+    const lastUpdate = this.lastUpdateMs.get(name) || 0;
+    if (now - lastUpdate > CONFIG.jointHoldMs) {
+      this.lastGood.delete(name);
+      this.lastUpdateMs.delete(name);
+      return null;
+    }
 
     return prev.clone();
   }
@@ -2683,6 +3022,9 @@ class MirrorApp {
     this.lastPoseLog = 0;
     this.lastHandLog = 0;
     this.lastFaceLog = 0;
+    this.lastPoseDetectAt = 0;
+    this.lastHandDetectAt = 0;
+    this.lastFaceDetectAt = 0;
 
     this.modeMirror = CONFIG.mirrorModeDefault;
     this.prevLowerEstimated = false;
@@ -2697,9 +3039,22 @@ class MirrorApp {
     this.prevPoseDetected = false;
     this.prevHandsDetected = false;
     this.prevFaceDetected = false;
+    this.poseMissingSince = 0;
+    this.noPoseCenterApplied = false;
     this.avatarIndex = this.readAvatarIndex();
     this.lightingMode = this.readLightingMode();
     this.switchingAvatar = false;
+    this.avatarLoading = false;
+    this.avatarPickerOpen = false;
+    this.avatarPickerSelection = this.avatarIndex;
+    this.avatarPickerAllowClose = true;
+    this.avatarPreviewReady = new Set();
+    this.avatarPreviewWarmupDone = false;
+    this.avatarPreviewWarmers = [];
+    this.avatarPrefetchFailed = new Set();
+    this.waitingForBoneDetection = false;
+    this.downloadingAvatarGlb = false;
+    this.copyingRigReport = false;
 
     this.debugEnabled = CONFIG.debugEnabledDefault;
     this.debugForceCamera = CONFIG.debugForceCameraDefault;
@@ -2712,6 +3067,181 @@ class MirrorApp {
 
   log(message, level = "INFO") {
     this.debugLog.push(message, level);
+  }
+
+  formatRigFailureReason(reason) {
+    switch (reason) {
+      case "no-path":
+        return "Avatar path is missing.";
+      case "unrigged-mesh":
+        return "GLB has no skinned skeleton mesh.";
+      case "missing-required-bones":
+        return "Required humanoid bones are missing.";
+      case "load-error":
+        return "GLB could not be loaded.";
+      case "ok":
+        return "Rig mapping succeeded.";
+      default:
+        return "Rig detection is still in progress.";
+    }
+  }
+
+  getRigDiagnosticSummary() {
+    const diag = this.motion?.lastRigDiagnostic;
+    if (!diag) return "Rig diagnostic not available.";
+
+    const missing = Array.isArray(diag.missingRequiredBones) ? diag.missingRequiredBones : [];
+    const reasonLabel = this.formatRigFailureReason(diag.reason);
+    const missingLabel = missing.length
+      ? `Missing: ${missing.join(", ")}`
+      : "Missing: none";
+    return `${reasonLabel} ${missingLabel}`;
+  }
+
+  buildRigDiagnosticReport() {
+    const avatar = this.getSelectedAvatar();
+    const diag = this.motion?.lastRigDiagnostic || {};
+    const missing = Array.isArray(diag.missingRequiredBones) ? diag.missingRequiredBones : [];
+    const detectedNames = Array.isArray(diag.detectedBoneNames) ? diag.detectedBoneNames : [];
+    const resolvedMap = diag.resolvedBoneMap && typeof diag.resolvedBoneMap === "object"
+      ? diag.resolvedBoneMap
+      : null;
+
+    const lines = [
+      "Aether Mirror Rig Diagnostic",
+      `Generated: ${new Date().toISOString()}`,
+      `Avatar: ${avatar?.name || "Unknown"}`,
+      `Path: ${avatar?.path || "N/A"}`,
+      `Reason: ${diag.reason || "unknown"} (${this.formatRigFailureReason(diag.reason)})`,
+      `Skeleton Status: ${diag.skeletonStatus || "unknown"}`,
+      `Fallback Active: ${diag.fallbackActive ? "yes" : "no"}`,
+      `Can Track: ${diag.canTrack ? "yes" : "no"}`,
+      `Detected Bones: ${Number.isFinite(diag.detectedBoneCount) ? diag.detectedBoneCount : 0}`,
+      `Required Bones: ${Number.isFinite(diag.requiredBoneCount) ? diag.requiredBoneCount : REQUIRED_BONES.length}`,
+      `Max Missing Allowed: ${Number.isFinite(diag.maxMissingRequiredBones) ? diag.maxMissingRequiredBones : MAX_MISSING_REQUIRED_BONES}`,
+      `Missing Required (${missing.length}): ${missing.length ? missing.join(", ") : "none"}`,
+    ];
+
+    if (diag.error) {
+      lines.push(`Error: ${diag.error}`);
+    }
+
+    if (resolvedMap) {
+      lines.push("");
+      lines.push("Resolved Bone Map:");
+      for (const key of Object.keys(resolvedMap)) {
+        lines.push(`- ${key}: ${resolvedMap[key] || "missing"}`);
+      }
+    }
+
+    if (detectedNames.length) {
+      lines.push("");
+      lines.push(`Detected Bone Names (${detectedNames.length}):`);
+      lines.push(detectedNames.join(", "));
+    }
+
+    return lines.join("\n");
+  }
+
+  refreshBoneWaitingActions() {
+    if (this.ui.avatarLoadingDownloadBtn) {
+      this.ui.avatarLoadingDownloadBtn.disabled = !this.waitingForBoneDetection || this.downloadingAvatarGlb;
+      this.ui.avatarLoadingDownloadBtn.textContent = this.downloadingAvatarGlb
+        ? "Downloading..."
+        : "Download GLB";
+    }
+
+    if (this.ui.avatarLoadingReportBtn) {
+      this.ui.avatarLoadingReportBtn.disabled = !this.waitingForBoneDetection || this.copyingRigReport;
+      this.ui.avatarLoadingReportBtn.textContent = this.copyingRigReport
+        ? "Copying..."
+        : "Copy Rig Report";
+    }
+
+    if (this.ui.avatarLoadingSwitchBtn) {
+      this.ui.avatarLoadingSwitchBtn.disabled = !this.waitingForBoneDetection || this.switchingAvatar || this.avatarLoading;
+    }
+  }
+
+  async copyTextToClipboard(text) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+
+    const helper = document.createElement("textarea");
+    helper.value = text;
+    helper.setAttribute("readonly", "true");
+    helper.style.position = "fixed";
+    helper.style.left = "-9999px";
+    document.body.appendChild(helper);
+    helper.select();
+    document.execCommand("copy");
+    document.body.removeChild(helper);
+  }
+
+  async copyRigReportToClipboard() {
+    if (!this.waitingForBoneDetection || this.copyingRigReport) return;
+
+    this.copyingRigReport = true;
+    this.refreshBoneWaitingActions();
+    try {
+      const report = this.buildRigDiagnosticReport();
+      await this.copyTextToClipboard(report);
+      this.ui.showStartNote("Rig report copied. Share it to fix bone detection.", false);
+      this.log("Rig diagnostic report copied to clipboard.");
+    } catch (error) {
+      this.ui.showStartNote(`Could not copy rig report: ${error.message}`, true);
+      this.log(`Copy rig report failed: ${error.message}`, "ERROR");
+    } finally {
+      this.copyingRigReport = false;
+      this.refreshBoneWaitingActions();
+    }
+  }
+
+  async downloadCurrentAvatarGlb() {
+    if (!this.waitingForBoneDetection || this.downloadingAvatarGlb) return;
+
+    const avatar = this.getSelectedAvatar();
+    const source = String(avatar?.path || "").trim();
+    if (!source) {
+      this.ui.showStartNote("Cannot download: avatar path is empty.", true);
+      return;
+    }
+
+    this.downloadingAvatarGlb = true;
+    this.refreshBoneWaitingActions();
+    try {
+      this.ui.showStartNote(`Downloading GLB: ${avatar.name}...`);
+      const response = await fetch(source, { mode: "cors", credentials: "omit" });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      const fileNameFromPath = decodeURIComponent(source.split("?")[0].split("#")[0].split("/").pop() || "");
+      const safeName = fileNameFromPath && /\.glb$/i.test(fileNameFromPath)
+        ? fileNameFromPath
+        : `${String(avatar.name || "avatar").trim().replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase() || "avatar"}.glb`;
+
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = safeName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+
+      this.ui.showStartNote(`Downloaded GLB: ${safeName}.`, false);
+      this.log(`Downloaded fallback GLB for diagnostics: ${safeName}.`);
+    } catch (error) {
+      this.ui.showStartNote(`GLB download failed: ${error.message}`, true);
+      this.log(`GLB download failed: ${error.message}`, "ERROR");
+    } finally {
+      this.downloadingAvatarGlb = false;
+      this.refreshBoneWaitingActions();
+    }
   }
 
   readAvatarIndex() {
@@ -2767,13 +3297,17 @@ class MirrorApp {
 
   syncAvatarButton() {
     const avatar = this.getSelectedAvatar();
+    const disabled = this.switchingAvatar || this.avatarLoading;
     if (this.ui.avatarBtn) {
       this.ui.avatarBtn.textContent = `Change Character: ${avatar.name}`;
-      this.ui.avatarBtn.disabled = this.switchingAvatar;
+      this.ui.avatarBtn.disabled = disabled;
     }
     if (this.ui.startAvatarBtn) {
       this.ui.startAvatarBtn.textContent = `Change Character: ${avatar.name}`;
-      this.ui.startAvatarBtn.disabled = this.switchingAvatar;
+      this.ui.startAvatarBtn.disabled = disabled;
+    }
+    if (this.ui.menuBtn) {
+      this.ui.menuBtn.disabled = disabled || !CONFIG.avatars.length;
     }
   }
 
@@ -2796,39 +3330,224 @@ class MirrorApp {
   async loadSelectedAvatar() {
     const avatar = this.getSelectedAvatar();
     const startMs = performance.now();
+    this.waitingForBoneDetection = false;
+    this.refreshBoneWaitingActions();
     this.ui.setStatus("avatar", `loading ${avatar.name}`);
     this.ui.showStartNote(`Loading avatar: ${avatar.name}...`);
     this.log(`Loading avatar: ${avatar.name}.`);
 
-    this.motion.setLightingMode(this.lightingMode);
-    await this.motion.loadAvatar(avatar.path);
-    this.applyDebugState();
+    this.avatarLoading = true;
+    this.motion.frozen = true;
+    this.ui.showAvatarLoading(`Loading avatar: ${avatar.name}...`, 0);
 
-    const label = this.motion.useFallback
-      ? `${avatar.name} fallback`
-      : avatar.name;
-    this.ui.setStatus("avatar", label);
-    this.log(
-      this.motion.useFallback
-        ? `Avatar ${avatar.name} could not use rig. Fallback skeleton active.`
-        : `Avatar ${avatar.name} loaded and rigged.`
-    );
-    const elapsedMs = Math.round(performance.now() - startMs);
-    this.log(`Avatar load time: ${elapsedMs}ms.`);
-    this.ui.showStartNote(`Avatar ready: ${avatar.name}.`);
+    try {
+      this.motion.setLightingMode(this.lightingMode);
+      await this.motion.loadAvatar(avatar.path, {
+        onProgress: ({ progress }) => {
+          const label = Number.isFinite(progress)
+            ? `Loading avatar: ${avatar.name}...`
+            : `Loading avatar: ${avatar.name}... (processing)`;
+          this.ui.setAvatarLoading(label, progress);
+        },
+      });
+      this.ui.setAvatarLoading(`Avatar ready: ${avatar.name}.`, 1);
+      this.applyDebugState();
+
+      const label = this.motion.useFallback
+        ? `${avatar.name} fallback`
+        : avatar.name;
+      this.ui.setStatus("avatar", label);
+
+      this.waitingForBoneDetection = Boolean(this.motion.useFallback || !this.motion.skeletonFound);
+      if (this.waitingForBoneDetection) {
+        const diagnosticSummary = this.getRigDiagnosticSummary();
+        this.ui.showBoneDetectionWaiting(
+          `No bones detected for ${avatar.name}. Waiting for a rigged avatar...`,
+          diagnosticSummary
+        );
+        this.ui.showStartNote(
+          "No avatar bone rig detected. Switch character and wait for Skeleton Found: yes.",
+          true
+        );
+      } else {
+        this.ui.setAvatarLoading(`Avatar ready: ${avatar.name}.`, 1);
+      }
+      this.refreshBoneWaitingActions();
+
+      this.log(
+        this.motion.useFallback
+          ? `Avatar ${avatar.name} could not use rig. Fallback skeleton active.`
+          : `Avatar ${avatar.name} loaded and rigged.`
+      );
+      const elapsedMs = Math.round(performance.now() - startMs);
+      this.log(`Avatar load time: ${elapsedMs}ms.`);
+      if (!this.waitingForBoneDetection) {
+        this.ui.showStartNote(`Avatar ready: ${avatar.name}.`);
+      }
+    } finally {
+      this.avatarLoading = false;
+      this.motion.frozen = false;
+      this.refreshBoneWaitingActions();
+      setTimeout(() => {
+        if (!this.avatarLoading && !this.waitingForBoneDetection) this.ui.hideAvatarLoading();
+      }, 140);
+    }
   }
 
-  async switchAvatar() {
-    if (this.switchingAvatar || CONFIG.avatars.length < 2) return;
+  getAvatarPreviewSrc(avatar) {
+    if (!avatar) return "";
+    return avatar.preview || "";
+  }
 
-    this.avatarIndex = (this.avatarIndex + 1) % CONFIG.avatars.length;
+  prefetchAvatarByIndex(index = this.avatarIndex) {
+    if (!this.motion) return;
+    const avatar = CONFIG.avatars[index];
+    if (!avatar?.path) return;
+    this.motion.prefetchAvatar(avatar.path).catch((error) => {
+      if (this.avatarPrefetchFailed.has(avatar.path)) return;
+      this.avatarPrefetchFailed.add(avatar.path);
+      this.log(`Avatar prefetch skipped for ${avatar.name}: ${error.message}`, "WARN");
+    });
+  }
+
+  preloadAvatarPreviews() {
+    if (this.avatarPreviewWarmupDone) return;
+    this.avatarPreviewWarmupDone = true;
+
+    CONFIG.avatars.forEach((avatar, index) => {
+      const src = this.getAvatarPreviewSrc(avatar);
+      if (!src || this.avatarPreviewReady.has(src)) return;
+
+      const preload = new Image();
+      preload.decoding = "async";
+      preload.fetchPriority = index < 3 ? "high" : "auto";
+      preload.addEventListener(
+        "load",
+        () => {
+          this.avatarPreviewReady.add(src);
+        },
+        { once: true }
+      );
+      preload.addEventListener(
+        "error",
+        () => {
+          // Keep glyph fallback when preview cannot be loaded.
+        },
+        { once: true }
+      );
+      preload.src = src;
+      if (preload.complete && preload.naturalWidth > 0) {
+        this.avatarPreviewReady.add(src);
+      }
+      this.avatarPreviewWarmers.push(preload);
+    });
+  }
+
+  renderAvatarPickerCards() {
+    if (!this.ui.avatarPickerGrid) return;
+    this.ui.avatarPickerGrid.innerHTML = "";
+
+    CONFIG.avatars.forEach((avatar, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "avatar-profile";
+      button.dataset.avatarIndex = String(index);
+      if (index === this.avatarPickerSelection) button.classList.add("selected");
+
+      const card = document.createElement("span");
+      card.className = "avatar-profile-card";
+      const glyph = document.createElement("span");
+      glyph.className = "avatar-profile-glyph";
+      glyph.textContent = avatarGlyph(avatar.name);
+      const previewSrc = this.getAvatarPreviewSrc(avatar);
+      if (previewSrc) {
+        const thumb = document.createElement("img");
+        thumb.className = "avatar-profile-thumb";
+        thumb.alt = `${avatar.name} preview`;
+        thumb.loading = "eager";
+        thumb.decoding = "async";
+        thumb.fetchPriority = index < 3 ? "high" : "auto";
+
+        const markReady = () => {
+          thumb.classList.add("is-ready");
+          glyph.classList.add("hidden");
+          this.avatarPreviewReady.add(previewSrc);
+        };
+        thumb.addEventListener("load", markReady, { once: true });
+        thumb.addEventListener(
+          "error",
+          () => {
+            thumb.remove();
+          },
+          { once: true }
+        );
+        thumb.src = previewSrc;
+        if (this.avatarPreviewReady.has(previewSrc) || (thumb.complete && thumb.naturalWidth > 0)) {
+          markReady();
+        }
+        card.appendChild(thumb);
+      }
+      card.appendChild(glyph);
+
+      const name = document.createElement("span");
+      name.className = "avatar-profile-name";
+      name.textContent = avatar.name;
+
+      button.append(card, name);
+      this.ui.avatarPickerGrid.appendChild(button);
+    });
+  }
+
+  openAvatarPicker(options = {}) {
+    if (!CONFIG.avatars.length || !this.ui.avatarPicker) return;
+    if (this.avatarLoading || this.switchingAvatar) return;
+
+    const title = options.title || "Choose Your Character";
+    const allowClose = options.allowClose !== false;
+    this.avatarPickerAllowClose = allowClose;
+    this.avatarPickerSelection = this.avatarIndex;
+
+    this.ui.setAvatarPickerTitle(title);
+    this.ui.setAvatarPickerCloseVisible(allowClose);
+    this.renderAvatarPickerCards();
+    this.ui.setAvatarPickerVisible(true);
+    this.avatarPickerOpen = true;
+  }
+
+  closeAvatarPicker(force = false) {
+    if (!this.avatarPickerOpen) return;
+    if (!force && !this.avatarPickerAllowClose) return;
+    this.avatarPickerOpen = false;
+    this.ui.setAvatarPickerVisible(false);
+  }
+
+  selectAvatarFromPicker(index) {
+    const nextIndex = Number(index);
+    if (!Number.isInteger(nextIndex) || nextIndex < 0 || nextIndex >= CONFIG.avatars.length) return;
+    this.avatarPickerSelection = nextIndex;
+    this.renderAvatarPickerCards();
+    this.prefetchAvatarByIndex(nextIndex);
+  }
+
+  async applyAvatarPickerSelection() {
+    if (this.switchingAvatar || this.avatarLoading) return;
+    const nextIndex = this.avatarPickerSelection;
+    const changed = nextIndex !== this.avatarIndex;
+    this.avatarIndex = nextIndex;
     this.saveAvatarIndex();
     this.syncAvatarButton();
+    this.closeAvatarPicker(true);
 
     const avatar = this.getSelectedAvatar();
     if (!this.cameraStarted) {
+      this.prefetchAvatarByIndex(this.avatarIndex);
       this.ui.showStartNote(`Avatar selected: ${avatar.name}. Start camera to load it.`);
       this.log(`Avatar selected before camera start: ${avatar.name}.`);
+      return;
+    }
+
+    if (!changed) {
+      this.ui.showStartNote(`Avatar unchanged: ${avatar.name}.`);
       return;
     }
 
@@ -3020,6 +3739,15 @@ class MirrorApp {
     this.motion.resetTransform();
     this.motion.setManualScaleMultiplier(this.calibrationConsole.getScaleMultiplier());
     this.resizeDebugCanvas();
+    this.preloadAvatarPreviews();
+    this.prefetchAvatarByIndex(this.avatarIndex);
+    if (CONFIG.avatars.length) {
+      this.openAvatarPicker({
+        title: "Choose Your Character",
+        allowClose: false,
+      });
+      this.ui.showStartNote("Select a character card first.");
+    }
     this.loop();
   }
 
@@ -3040,7 +3768,7 @@ class MirrorApp {
       antialias: true,
       alpha: true,
     });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, CONFIG.rendererPixelRatioCap));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -3103,10 +3831,21 @@ class MirrorApp {
     window.addEventListener("resize", this.handleResize);
   }
 
+  runUiAction(event, action) {
+    event.preventDefault();
+    event.stopPropagation();
+    return action(event);
+  }
+
+  bindPress(target, action) {
+    if (!target) return;
+    const handler = (event) => this.runUiAction(event, action);
+    target.addEventListener("click", handler);
+    target.addEventListener("touchend", handler, { passive: false });
+  }
+
   bindUI() {
-    const startHandler = async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
+    this.bindPress(this.ui.startBtn, async () => {
       if (this.insecureContextBlocked) return;
       if (this.startingCamera || this.cameraStarted) return;
       this.startingCamera = true;
@@ -3122,15 +3861,9 @@ class MirrorApp {
       } finally {
         this.startingCamera = false;
       }
-    };
+    });
 
-    this.ui.startBtn.addEventListener("click", startHandler);
-    this.ui.startBtn.addEventListener("touchend", startHandler, { passive: false });
-
-    const calibrateHandler = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-
+    this.bindPress(this.ui.calibrateBtn, () => {
       if (!this.cameraStarted) {
         this.ui.showStartNote("Start camera first, then calibrate.", true);
         return;
@@ -3143,81 +3876,89 @@ class MirrorApp {
 
       this.calibrator.tryCalibrate(this.latestSmoothedJoints, this.latestBodyScale);
       this.log("Manual calibration requested.");
-    };
+    });
 
-    if (this.ui.calibrateBtn) {
-      this.ui.calibrateBtn.addEventListener("click", calibrateHandler);
-      this.ui.calibrateBtn.addEventListener("touchend", calibrateHandler, { passive: false });
-    }
-
-    const flipHandler = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
+    this.bindPress(this.ui.flipBtn, () => {
       const orientation = this.motion.cycleOrientationPreset();
       this.ui.showStartNote(`Orientation changed: ${orientation}.`);
       this.log(`Orientation changed to: ${orientation}.`);
+    });
+
+    const openAvatarMenu = (title) => {
+      this.openAvatarPicker({
+        title,
+        allowClose: true,
+      });
     };
 
-    if (this.ui.flipBtn) {
-      this.ui.flipBtn.addEventListener("click", flipHandler);
-      this.ui.flipBtn.addEventListener("touchend", flipHandler, { passive: false });
+    this.bindPress(this.ui.avatarBtn, () => {
+      openAvatarMenu(this.cameraStarted ? "Switch Character" : "Choose Your Character");
+    });
+    this.bindPress(this.ui.startAvatarBtn, () => {
+      openAvatarMenu(this.cameraStarted ? "Switch Character" : "Choose Your Character");
+    });
+    this.bindPress(this.ui.menuBtn, () => {
+      openAvatarMenu("Character Menu");
+    });
+    this.bindPress(this.ui.avatarLoadingDownloadBtn, async () => {
+      await this.downloadCurrentAvatarGlb();
+    });
+    this.bindPress(this.ui.avatarLoadingReportBtn, async () => {
+      await this.copyRigReportToClipboard();
+    });
+    this.bindPress(this.ui.avatarLoadingSwitchBtn, () => {
+      openAvatarMenu("Switch Character");
+    });
+
+    if (this.ui.avatarPickerGrid) {
+      this.ui.avatarPickerGrid.addEventListener("click", (event) => {
+        const button = event.target?.closest?.(".avatar-profile");
+        if (!button) return;
+        this.runUiAction(event, async () => {
+          const nextIndex = Number(button.dataset.avatarIndex);
+          this.selectAvatarFromPicker(nextIndex);
+          await this.applyAvatarPickerSelection();
+        });
+      });
     }
 
-    const avatarHandler = async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      await this.switchAvatar();
+    this.bindPress(this.ui.avatarPickerCloseBtn, () => {
+      this.closeAvatarPicker();
+    });
+
+    const pickerBackdropHandler = (event) => {
+      if (event.target !== this.ui.avatarPicker) return;
+      this.closeAvatarPicker();
     };
 
-    if (this.ui.avatarBtn) {
-      this.ui.avatarBtn.addEventListener("click", avatarHandler);
-      this.ui.avatarBtn.addEventListener("touchend", avatarHandler, { passive: false });
+    if (this.ui.avatarPicker) {
+      this.ui.avatarPicker.addEventListener("click", pickerBackdropHandler);
     }
 
-    if (this.ui.startAvatarBtn) {
-      this.ui.startAvatarBtn.addEventListener("click", avatarHandler);
-      this.ui.startAvatarBtn.addEventListener("touchend", avatarHandler, { passive: false });
-    }
-
-    const lightingHandler = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
+    this.bindPress(this.ui.lightBtn, () => {
       this.toggleLightingMode();
-    };
+    });
 
-    if (this.ui.lightBtn) {
-      this.ui.lightBtn.addEventListener("click", lightingHandler);
-      this.ui.lightBtn.addEventListener("touchend", lightingHandler, { passive: false });
-    }
-
-    const debugToggleHandler = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
+    this.bindPress(this.ui.debugBtn, () => {
       this.debugEnabled = !this.debugEnabled;
       this.applyDebugState();
       this.log(`Debug ${this.debugEnabled ? "enabled" : "disabled"}.`);
-    };
+    });
 
-    const cameraDebugHandler = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
+    this.bindPress(this.ui.cameraDebugBtn, () => {
       this.debugForceCamera = !this.debugForceCamera;
       this.applyDebugState();
       this.log(`Camera overlay ${this.debugForceCamera ? "forced visible" : "auto mode"}.`);
-    };
+    });
 
-    const landmarksDebugHandler = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
+    this.bindPress(this.ui.landmarkDebugBtn, () => {
       this.debugLandmarks = !this.debugLandmarks;
       this.applyDebugState();
       this.log(`Landmark debug ${this.debugLandmarks ? "enabled" : "disabled"}.`);
-    };
+    });
 
     let lastBonesToggleAt = 0;
-    const bonesDebugHandler = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
+    this.bindPress(this.ui.bonesDebugBtn, () => {
       const now = performance.now();
       if (now - lastBonesToggleAt < 320) return;
       lastBonesToggleAt = now;
@@ -3238,24 +3979,9 @@ class MirrorApp {
           true
         );
       }
-    };
+    });
 
-    if (this.ui.debugBtn) {
-      this.ui.debugBtn.addEventListener("click", debugToggleHandler);
-      this.ui.debugBtn.addEventListener("touchend", debugToggleHandler, { passive: false });
-    }
-    if (this.ui.cameraDebugBtn) {
-      this.ui.cameraDebugBtn.addEventListener("click", cameraDebugHandler);
-      this.ui.cameraDebugBtn.addEventListener("touchend", cameraDebugHandler, { passive: false });
-    }
-    if (this.ui.landmarkDebugBtn) {
-      this.ui.landmarkDebugBtn.addEventListener("click", landmarksDebugHandler);
-      this.ui.landmarkDebugBtn.addEventListener("touchend", landmarksDebugHandler, { passive: false });
-    }
-    if (this.ui.bonesDebugBtn) {
-      this.ui.bonesDebugBtn.addEventListener("click", bonesDebugHandler);
-      this.ui.bonesDebugBtn.addEventListener("touchend", bonesDebugHandler, { passive: false });
-    }
+    this.refreshBoneWaitingActions();
   }
 
   async startCamera() {
@@ -3418,20 +4144,42 @@ class MirrorApp {
     }
   }
 
-  updateTracking(now, dt) {
-    if (!this.cameraStarted || !this.poseLandmarker || !this.handLandmarker || !this.faceLandmarker) return;
-    if (this.video.readyState < 2) return;
+  refreshTrackingResults(now) {
+    const shouldRunPose = (
+      !this.lastPoseResult
+      || now - this.lastPoseDetectAt >= CONFIG.poseDetectIntervalMs
+    );
+    if (shouldRunPose) {
+      this.lastPoseResult = this.poseLandmarker.detectForVideo(this.video, now);
+      this.lastPoseDetectAt = now;
+    }
 
-    if (this.video.currentTime === this.lastVideoTime) return;
-    this.lastVideoTime = this.video.currentTime;
+    const shouldRunHand = (
+      !this.lastHandResult
+      || now - this.lastHandDetectAt >= CONFIG.handDetectIntervalMs
+    );
+    if (shouldRunHand) {
+      this.lastHandResult = this.handLandmarker.detectForVideo(this.video, now);
+      this.lastHandDetectAt = now;
+    }
 
-    const poseResult = this.poseLandmarker.detectForVideo(this.video, now);
-    const handResult = this.handLandmarker.detectForVideo(this.video, now);
-    const faceResult = this.faceLandmarker.detectForVideo(this.video, now);
-    this.lastPoseResult = poseResult;
-    this.lastHandResult = handResult;
-    this.lastFaceResult = faceResult;
+    const shouldRunFace = (
+      !this.lastFaceResult
+      || now - this.lastFaceDetectAt >= CONFIG.faceDetectIntervalMs
+    );
+    if (shouldRunFace) {
+      this.lastFaceResult = this.faceLandmarker.detectForVideo(this.video, now);
+      this.lastFaceDetectAt = now;
+    }
 
+    return {
+      poseResult: this.lastPoseResult,
+      handResult: this.lastHandResult,
+      faceResult: this.lastFaceResult,
+    };
+  }
+
+  updateFaceTrackingState(faceResult, now, dt) {
     const mouthState = this.mouthTracker.update(faceResult);
     this.latestMouthOpen = mouthState.open;
     this.motion.applyMouth(this.latestMouthOpen, dt);
@@ -3447,59 +4195,100 @@ class MirrorApp {
         console.log("MediaPipe face blendshapes:", faceResult.faceBlendshapes?.[0]?.categories || []);
         this.lastFaceLog = now;
       }
-    } else {
-      this.ui.setStatus("face", "not detected");
-      this.ui.setStatus("mouth", "closed");
-      if (this.prevFaceDetected) this.log("Face tracking lost.", "WARN");
-      this.prevFaceDetected = false;
+      return;
     }
 
-    if (poseResult?.landmarks?.length) {
-      this.ui.setStatus("pose", "detected");
-      this.ui.setStatus("poseCount", String(poseResult.landmarks[0]?.length || 0));
-      if (!this.prevPoseDetected) this.log("Pose detected.");
-      this.prevPoseDetected = true;
+    this.ui.setStatus("face", "not detected");
+    this.ui.setStatus("mouth", "closed");
+    if (this.prevFaceDetected) this.log("Face tracking lost.", "WARN");
+    this.prevFaceDetected = false;
+  }
 
-      if (now - this.lastPoseLog > CONFIG.poseLogIntervalMs) {
-        console.log("MediaPipe pose landmarks:", poseResult.landmarks[0]);
-        this.lastPoseLog = now;
-      }
+  applyTrackedPosePacket(packet, dt) {
+    const smoothed = this.smoother.update(packet.joints);
+    this.latestSmoothedJoints = smoothed;
+    this.latestBodyScale = packet.bodyScale;
 
-      const packet = this.poseTracker.build(poseResult, handResult, faceResult);
-      if (packet) {
-        const smoothed = this.smoother.update(packet.joints);
-        this.latestSmoothedJoints = smoothed;
-        this.latestBodyScale = packet.bodyScale;
-
-        if (packet.lowerEstimated && !this.prevLowerEstimated) {
-          console.warn("Lower body landmarks missing. Using estimated lower body.");
-        }
-        this.prevLowerEstimated = packet.lowerEstimated;
-
-        this.ui.setStatus("body", packet.fullBodyDetected ? "full body" : "upper body only");
-        this.ui.setStatus("estimate", packet.lowerEstimated ? "active" : "inactive");
-
-        const calibrated = this.calibrator.apply(smoothed, packet.bodyScale, dt);
-        const manualAdjusted = this.calibrationConsole.applyToJoints(calibrated.joints);
-        const calibrationStatus = this.calibrationConsole.hasManualAdjustment()
-          ? (this.calibrator.active ? "locked + manual" : "manual")
-          : (this.calibrator.active ? "locked" : "not set");
-        this.ui.setStatus("calibration", calibrationStatus);
-        this.motion.setCalibrationScaleMultiplier(1);
-        this.motion.setManualScaleMultiplier(this.calibrationConsole.getScaleMultiplier());
-        this.motion.applyPose(manualAdjusted, packet.bodyScale, dt, {
-          lowerEstimated: packet.lowerEstimated,
-          mouthOpen: this.latestMouthOpen,
-        });
-      }
-    } else {
-      this.ui.setStatus("pose", "not detected");
-      this.ui.setStatus("poseCount", "0");
-      if (this.prevPoseDetected) this.log("Pose lost.", "WARN");
-      this.prevPoseDetected = false;
-      this.prevLowerEstimated = false;
+    if (packet.lowerEstimated && !this.prevLowerEstimated) {
+      console.warn("Lower body landmarks missing. Using estimated lower body.");
     }
+    this.prevLowerEstimated = packet.lowerEstimated;
 
+    this.ui.setStatus("body", packet.fullBodyDetected ? "full body" : "upper body only");
+    this.ui.setStatus("estimate", packet.lowerEstimated ? "active" : "inactive");
+
+    const calibrated = this.calibrator.apply(smoothed, packet.bodyScale, dt);
+    const manualAdjusted = this.calibrationConsole.applyToJoints(calibrated.joints);
+    const calibrationStatus = this.calibrationConsole.hasManualAdjustment()
+      ? (this.calibrator.active ? "locked + manual" : "manual")
+      : (this.calibrator.active ? "locked" : "not set");
+    this.ui.setStatus("calibration", calibrationStatus);
+    this.motion.setCalibrationScaleMultiplier(1);
+    this.motion.setManualScaleMultiplier(this.calibrationConsole.getScaleMultiplier());
+    this.motion.applyPose(manualAdjusted, packet.bodyScale, dt, {
+      lowerEstimated: packet.lowerEstimated,
+      mouthOpen: this.latestMouthOpen,
+    });
+  }
+
+  buildFaceOnlyJoints(faceResult) {
+    const faceLm = faceResult?.faceLandmarks?.[0];
+    const noseLm = faceLm?.[FACE.NOSE_TIP];
+    if (!noseLm) return null;
+
+    const facePoint = this.poseTracker.toScene(noseLm);
+    const leftCheekLm = faceLm?.[FACE.LEFT_CHEEK];
+    const rightCheekLm = faceLm?.[FACE.RIGHT_CHEEK];
+    const foreheadLm = faceLm?.[FACE.FOREHEAD];
+    const chinLm = faceLm?.[FACE.CHIN];
+
+    const leftCheek = leftCheekLm ? this.poseTracker.toScene(leftCheekLm) : null;
+    const rightCheek = rightCheekLm ? this.poseTracker.toScene(rightCheekLm) : null;
+    const cheekMid = leftCheek && rightCheek ? midpoint(leftCheek, rightCheek) : null;
+    const forehead = foreheadLm ? this.poseTracker.toScene(foreheadLm) : null;
+    const chin = chinLm ? this.poseTracker.toScene(chinLm) : null;
+
+    const headCandidates = [facePoint];
+    if (cheekMid) headCandidates.push(cheekMid);
+    if (forehead && chin) headCandidates.push(midpoint(forehead, chin));
+    const headPoint = averagePoints(headCandidates) || facePoint.clone();
+
+    const neckPoint = midpoint(headPoint, facePoint).add(new THREE.Vector3(0, -0.08, 0));
+    const chestPoint = neckPoint.clone().add(new THREE.Vector3(0, -0.22, 0));
+    const hipsPoint = chestPoint.clone().add(new THREE.Vector3(0, -0.22, 0));
+    const shoulderHalf = clamp(
+      cheekMid ? facePoint.distanceTo(cheekMid) : 0.12,
+      0.08,
+      0.22
+    );
+
+    return {
+      face: facePoint,
+      head: headPoint,
+      neck: neckPoint,
+      chest: chestPoint,
+      hips: hipsPoint,
+      leftShoulder: chestPoint.clone().add(new THREE.Vector3(-shoulderHalf, 0.08, 0)),
+      rightShoulder: chestPoint.clone().add(new THREE.Vector3(shoulderHalf, 0.08, 0)),
+    };
+  }
+
+  applyFaceOnlyTracking(faceResult, dt) {
+    const faceOnlyJoints = this.buildFaceOnlyJoints(faceResult);
+    if (!faceOnlyJoints) return false;
+
+    this.motion.applyPose(faceOnlyJoints, this.latestBodyScale || 1, dt, {
+      lowerEstimated: true,
+      mouthOpen: this.latestMouthOpen,
+    });
+    this.poseMissingSince = 0;
+    this.noPoseCenterApplied = false;
+    this.ui.setStatus("body", "face only");
+    this.ui.setStatus("estimate", "inactive");
+    return true;
+  }
+
+  updateHandTrackingState(handResult, now) {
     if (handResult?.landmarks?.length) {
       this.ui.setStatus("hands", `${handResult.landmarks.length} detected`);
       this.ui.setStatus("handCount", String((handResult.landmarks.length || 0) * 21));
@@ -3509,15 +4298,91 @@ class MirrorApp {
         console.log("MediaPipe hand landmarks:", handResult.landmarks);
         this.lastHandLog = now;
       }
-    } else {
-      this.ui.setStatus("hands", "arms at side");
-      this.ui.setStatus("handCount", "0");
-      if (this.prevHandsDetected) this.log("Hand tracking standby.", "WARN");
-      this.prevHandsDetected = false;
+      return;
     }
 
+    this.ui.setStatus("hands", "arms at side");
+    this.ui.setStatus("handCount", "0");
+    if (this.prevHandsDetected) this.log("Hand tracking standby.", "WARN");
+    this.prevHandsDetected = false;
+  }
+
+  handlePoseDetected(poseResult, handResult, faceResult, now, dt) {
+    this.ui.setStatus("pose", "detected");
+    this.ui.setStatus("poseCount", String(poseResult.landmarks[0]?.length || 0));
+    if (!this.prevPoseDetected) this.log("Pose detected.");
+    this.prevPoseDetected = true;
+    this.poseMissingSince = 0;
+    this.noPoseCenterApplied = false;
+
+    if (now - this.lastPoseLog > CONFIG.poseLogIntervalMs) {
+      console.log("MediaPipe pose landmarks:", poseResult.landmarks[0]);
+      this.lastPoseLog = now;
+    }
+
+    const packet = this.poseTracker.build(poseResult, handResult, faceResult);
+    if (packet) {
+      this.applyTrackedPosePacket(packet, dt);
+    }
+  }
+
+  handlePoseMissing(now, dt, faceResult) {
+    this.ui.setStatus("pose", "not detected");
+    this.ui.setStatus("poseCount", "0");
+    if (this.prevPoseDetected) this.log("Pose lost.", "WARN");
+    this.prevPoseDetected = false;
+    this.prevLowerEstimated = false;
+
+    if (this.applyFaceOnlyTracking(faceResult, dt)) {
+      return "Face Only Tracking";
+    }
+
+    if (!this.poseMissingSince) {
+      this.poseMissingSince = now;
+    }
+
+    const poseMissingForMs = now - this.poseMissingSince;
+    if (poseMissingForMs >= CONFIG.noPoseCenterDelayMs) {
+      this.motion.settleToCenterIdle(dt);
+      this.ui.setStatus("body", "center idle");
+      this.ui.setStatus("estimate", "inactive");
+
+      if (!this.noPoseCenterApplied) {
+        this.smoother.reset();
+        this.latestSmoothedJoints = null;
+        this.noPoseCenterApplied = true;
+        this.log("No body visual detected. Avatar returned to center idle.", "WARN");
+      }
+
+      return "No Visual - Center Idle";
+    }
+
+    return "1:1 Tracking";
+  }
+
+  updateTracking(now, dt) {
+    if (!this.cameraStarted || !this.poseLandmarker || !this.handLandmarker || !this.faceLandmarker) return;
+    if (this.switchingAvatar || this.avatarLoading) return;
+    if (this.video.readyState < 2) return;
+
+    if (this.video.currentTime === this.lastVideoTime) return;
+    this.lastVideoTime = this.video.currentTime;
+
+    const { poseResult, handResult, faceResult } = this.refreshTrackingResults(now);
+    this.updateFaceTrackingState(faceResult, now, dt);
+
+    let gestureLabel = "1:1 Tracking";
+
+    if (poseResult?.landmarks?.length) {
+      this.handlePoseDetected(poseResult, handResult, faceResult, now, dt);
+    } else {
+      gestureLabel = this.handlePoseMissing(now, dt, faceResult);
+    }
+
+    this.updateHandTrackingState(handResult, now);
+
     this.motion.frozen = false;
-    this.ui.setGesture("1:1 Tracking");
+    this.ui.setGesture(gestureLabel);
     this.drawDebugOverlay(poseResult, handResult, faceResult);
   }
 

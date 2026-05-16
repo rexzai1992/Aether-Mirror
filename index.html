@@ -11,7 +11,7 @@
       href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Rajdhani:wght@500;600;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="./style.css?v=20260504b" />
+    <link rel="stylesheet" href="./style.css?v=20260505c" />
   </head>
   <body>
     <div id="app">
@@ -19,9 +19,21 @@
       <canvas id="three-canvas"></canvas>
       <canvas id="debug-canvas"></canvas>
       <div id="scan-overlay" aria-hidden="true"></div>
-
-      <div id="mode-chip">Mode: Mirror AR</div>
-      <div id="gesture-chip">Gesture: None</div>
+      <div id="avatar-loading" aria-live="polite" aria-atomic="true">
+        <div class="loading-panel">
+          <span id="avatar-loading-text">Loading avatar...</span>
+          <div class="loading-bar-track">
+            <div id="avatar-loading-bar"></div>
+          </div>
+          <strong id="avatar-loading-percent">0%</strong>
+          <p id="avatar-loading-meta"></p>
+          <div id="avatar-loading-actions">
+            <button id="avatar-loading-download" type="button">Download GLB</button>
+            <button id="avatar-loading-report" type="button">Copy Rig Report</button>
+            <button id="avatar-loading-switch" type="button">Switch Character</button>
+          </div>
+        </div>
+      </div>
 
       <aside id="status-panel">
         <h2>System Status</h2>
@@ -40,7 +52,6 @@
           <li><span>Lower Body Estimate</span><strong id="status-estimate">inactive</strong></li>
           <li><span>Calibration</span><strong id="status-calibration">not set</strong></li>
           <li><span>Avatar Orientation</span><strong id="status-orientation">normal</strong></li>
-          <li><span>Current Gesture</span><strong id="status-gesture">none</strong></li>
           <li><span>Video Resolution</span><strong id="status-video-res">0x0</strong></li>
           <li><span>Pose Landmarks</span><strong id="status-pose-count">0</strong></li>
           <li><span>Hand Landmarks</span><strong id="status-hand-count">0</strong></li>
@@ -49,11 +60,8 @@
       </aside>
 
       <div id="control-dock">
-        <button id="calibrate-btn" type="button">Calibrate Pose</button>
-        <button id="flip-btn" type="button">Flip Avatar</button>
-        <button id="avatar-btn" type="button">Change Character: Vanguard</button>
+        <button id="menu-btn" type="button">Back to Menu</button>
         <button id="light-btn" type="button">Lighting: Unlit</button>
-        <button id="debug-btn" type="button">Debug: Off</button>
         <button id="camera-debug-btn" type="button">Camera: Auto</button>
         <button id="landmark-debug-btn" type="button">Landmarks: On</button>
         <button id="bones-debug-btn" type="button">Bones: Off</button>
@@ -128,8 +136,18 @@
             Stand in frame and let the mirror wrap the rig to your movement.
           </p>
           <button id="start-btn" type="button">Start Camera</button>
-          <button id="start-avatar-btn" type="button">Change Character: Vanguard</button>
           <p id="start-note"></p>
+        </div>
+      </div>
+
+      <div id="avatar-picker" aria-hidden="true">
+        <div class="avatar-picker-panel">
+          <span class="avatar-picker-eyebrow">Character Select</span>
+          <h2 id="avatar-picker-title">Choose Your Character</h2>
+          <div id="avatar-profile-grid" role="list"></div>
+          <div class="avatar-picker-actions">
+            <button id="avatar-picker-close" type="button">Cancel</button>
+          </div>
         </div>
       </div>
     </div>
@@ -145,15 +163,13 @@
       // Cloudflare R2 (mecha-mirror-assets) public dev URL.
       window.AETHER_R2_BASE_URL = "https://pub-cd27d334a1984adcbea5ecec537b401a.r2.dev";
       // Avatar manifest backed by R2 objects.
+      // Optional per-avatar thumbnail: preview / thumbnail / poster / image
       window.AETHER_R2_AVATARS = [
-        { name: "Vanguard", file: "avatar.glb" },
-        { name: "Iron Man Rig", file: "avatar_iron.glb" },
-        { name: "Avaturn", file: "avaturn.glb" },
-        { name: "Mecha", file: "avatar_mecha.glb" },
-        { name: "Alt", file: "avatar_alt.glb" },
-        { name: "Azure Titan", file: "avatar_azure_titan.glb" }
+        { name: "Vanguard", file: "avatar.glb", preview: "vanguard.jpg" },
+        { name: "Iron Man Rig", file: "avatar_iron.glb", preview: "iron-man-rig.jpg" },
+        { name: "Azure Titan", file: "avatar_azure_titan.glb", preview: "azure-titan.jpg" }
       ];
     </script>
-    <script type="module" src="./main.js?v=20260504i"></script>
+    <script type="module" src="./main.js?v=20260505h"></script>
   </body>
 </html>
